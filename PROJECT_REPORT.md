@@ -259,10 +259,10 @@ class PhysicalLink:
 **功能**: 提供统一的物理层接口，封装调制、传输、解调的完整流程。
 
 ![OOK调制信号波形](demo_level1_signals.png)
-*图1.1: OOK调制信号波形（蓝色为发送信号，橙色为接收信号）*
+*图1.1: OOK调制过程 - 上：原始比特；中：调制信号；下：接收信号（含噪声和衰减）*
 
 ![完整波形图](demo_level1_waveforms.png)
-*图1.2: 完整的比特流传输波形展示*
+*图1.2: 波形细节 - 上：发送"Hi"带比特标注和边界；下：接收信号带自适应阈值（绿线），SNR=14dB*
 
 ---
 
@@ -576,7 +576,7 @@ OOK调制: 每符号传输 1 bit
 ```
 
 ![Level 1 性能对比](demo_level1_performance.png)
-*图1.4: Level 1性能测试结果可视化*
+*图1.4: Level 1性能四维分析 - 左上：SNR vs 噪声；右上：BER vs 噪声（对数）；左下：Shannon容量 vs SNR；右下：成功率 vs 噪声*
 
 #### 技术要点
 
@@ -857,7 +857,7 @@ class Switch:
 **功能**: 实现以太网交换机的核心功能——MAC学习和智能转发。自动构建MAC→端口映射表，支持单播/广播/洪泛。
 
 ![星型网络拓扑](demo_level2_topology.png)
-*图2.1: 星型拓扑网络架构示意图*
+*图2.1: 星型拓扑网络 - 中心蓝色Switch连接6台绿色Host，黑线表示Cable，端口标注P0-P5*
 
 ---
 
@@ -1876,10 +1876,10 @@ class BPSK(ModulationScheme):
 **功能**: 实现四种调制方式，BPSK通过相位相关性检测达到最优抗噪性能。
 
 ![调制方式对比](modulation_comparison.png)
-*图3.4: 四种调制方式的误码率对比曲线*
+*图3.4: 四种调制方式BER对比 - BPSK(紫) < FSK(绿) < OOK(蓝) < ASK(红)，噪声范围σ=0.5~2.5*
 
 ![Level 3调制性能](demo_level3_modulation.png)
-*图3.5: Level 3调制方式性能详细分析*
+*图3.5: Level 3调制性能 - 四种调制方式在不同噪声下的BER曲线，验证BPSK性能最优*
 
 ---
 
@@ -2099,7 +2099,7 @@ class ConcurrentNetwork:
 **功能**: 使用线程池和消息队列实现并发网络，所有主机可同时收发消息，无阻塞。
 
 ![Level 3总结](demo_level3_summary.png)
-*图3.6: Level 3扩展功能综合展示*
+*图3.6: Level 3综合展示 - 左上：传输层ACK统计；右上：信道编码性能；左下：调制BER对比；右下：并发吞吐量*
 
 ---
 
