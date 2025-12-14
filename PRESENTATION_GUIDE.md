@@ -573,6 +573,8 @@ print(f'   GET /notfound -> {resp.status_code}')
 
 ### 任务 3.4: 调制方式对比演示 (10分)
 
+**重要说明**: 由于系统使用每bit 100采样点平均，需要使用较高噪声(0.5-3.0)才能展示调制方式的性能差异。
+
 **运行命令**:
 ```bash
 python3 -c "
@@ -597,13 +599,13 @@ for scheme in schemes:
     print(f'   {scheme.name:6s}: 信号长度={len(signal):4d}, 匹配={match}')
 print()
 
-# 噪声下性能
+# 噪声下性能 - 使用更高噪声水平
 print('2. 不同噪声下的误码率 (BER):')
-print('   方案     0.05    0.10    0.15    0.20')
-print('   ' + '-' * 45)
+print('   方案      0.5     1.0     1.5     2.0     2.5')
+print('   ' + '-' * 55)
 
 from cable import Cable
-noise_levels = [0.05, 0.1, 0.15, 0.2]
+noise_levels = [0.5, 1.0, 1.5, 2.0, 2.5]
 
 for scheme in schemes:
     print(f'   {scheme.name:6s}', end='')
@@ -623,15 +625,17 @@ for scheme in schemes:
             total_bits += min_len
 
         ber = total_errors / total_bits
-        print(f'  {ber:6.2%}', end='')
+        print(f'  {ber:6.1%}', end='')
     print()
 print()
 
-print('3. 调制方式特点:')
-print('   OOK  - 最简单，开关键控')
-print('   ASK  - 幅度调制，易受噪声影响')
-print('   FSK  - 频率调制，抗噪性好')
-print('   BPSK - 相位调制，性能最佳')
+print('3. 调制方式特点与性能:')
+print('   OOK  - 最简单的开关键控，中等抗噪性')
+print('   ASK  - 幅度调制，易受噪声影响(性能最差)')
+print('   FSK  - 频率调制，相关性检测，抗噪性好')
+print('   BPSK - 相位调制，相关性检测，性能最佳')
+print()
+print('结论: BPSK > FSK > OOK > ASK (抗噪声性能)')
 "
 ```
 
