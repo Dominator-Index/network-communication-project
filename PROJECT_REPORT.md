@@ -148,6 +148,116 @@ OOK调制后: 4000 个采样点 (每bit 100个采样)
 4. **自适应解调**: 使用信号统计特性自动计算阈值
 5. **完整性验证**: 传输前后消息完全一致
 
+#### 核心代码实现
+
+**1. 字符串/比特转换** (physical_layer.py)
+
+```python
+def string_to_bits(text: str) -> List[int]:
+    """将ASCII字符串转换为比特流，每字符8位，MSB优先"""
+    bits = []
+    for char in text:
+        ascii_val = ord(char)
+        for i in range(7, -1, -1):  # MSB first
+            bits.append((ascii_val >> i) & 1)
+    return bits
+
+def bits_to_string(bits: List[int]) -> str:
+    """将比特流转换回ASCII字符串"""
+    if len(bits) % 8 != 0:
+        bits = bits + [0] * (8 - len(bits) % 8)  # 填充
+
+    text = []
+    for i in range(0, len(bits), 8):
+        byte = bits[i:i+8]
+        ascii_val = 0
+        for bit in byte:
+            ascii_val = (ascii_val << 1) | bit
+        if ascii_val > 0:
+            text.append(chr(ascii_val))
+    return ''.join(text)
+```
+
+**功能**: 实现数据的数字化，将人类可读的字符串转换为可传输的比特流。
+
+**2. OOK调制/解调** (physical_layer.py)
+
+```python
+def modulate_ook(bits: List[int],
+                 samples_per_bit: int = 100,
+                 amplitude: float = 1.0) -> np.ndarray:
+    """
+    On-Off Keying调制: 将比特转换为模拟信号
+    - Bit 1: 高电平 (amplitude)
+    - Bit 0: 零电平 (0)
+    """
+    signal = np.zeros(len(bits) * samples_per_bit)
+
+    for i, bit in enumerate(bits):
+        start = i * samples_per_bit
+        end = (i + 1) * samples_per_bit
+        if bit == 1:
+            signal[start:end] = amplitude
+
+    return signal
+
+def demodulate_ook(signal: np.ndarray,
+                   samples_per_bit: int = 100,
+                   threshold: Optional[float] = None) -> List[int]:
+    """
+    OOK解调: 使用自适应阈值从模拟信号恢复比特
+    """
+    num_bits = len(signal) // samples_per_bit
+
+    # 自适应阈值计算
+    if threshold is None:
+        threshold = np.mean(np.abs(signal)) * 0.5
+
+    bits = []
+    for i in range(num_bits):
+        start = i * samples_per_bit
+        end = (i + 1) * samples_per_bit
+        avg = np.mean(signal[start:end])  # 平均100个采样点
+        bits.append(1 if avg > threshold else 0)
+
+    return bits
+```
+
+**功能**: 将数字比特流转换为物理层可传输的模拟信号，并在接收端恢复。通过100个采样点的平均有效降噪10倍。
+
+**3. 物理链路类** (physical_layer.py)
+
+```python
+class PhysicalLink:
+    """封装完整的物理层传输流程"""
+
+    def __init__(self, cable: Cable, samples_per_bit: int = 100):
+        self.cable = cable
+        self.samples_per_bit = samples_per_bit
+
+    def transmit_bits(self, bits: List[int]) -> List[int]:
+        """端到端比特传输: 调制 → Cable传输 → 解调"""
+        # 调制
+        signal = modulate_ook(bits, self.samples_per_bit)
+
+        # 通过Cable传输（衰减+噪声）
+        received_signal = self.cable.transmit(signal)
+
+        # 自适应阈值解调
+        threshold = calculate_adaptive_threshold(received_signal, self.samples_per_bit)
+        received_bits = demodulate_ook(received_signal, self.samples_per_bit, threshold)
+
+        return received_bits
+
+    def transmit_data(self, data: str) -> str:
+        """字符串级别的传输接口"""
+        bits = string_to_bits(data)
+        received_bits = self.transmit_bits(bits)
+        return bits_to_string(received_bits)
+```
+
+**功能**: 提供统一的物理层接口，封装调制、传输、解调的完整流程。
+
 ![OOK调制信号波形](demo_level1_signals.png)
 *图1.1: OOK调制信号波形（蓝色为发送信号，橙色为接收信号）*
 
@@ -243,6 +353,86 @@ print('└──────────┴────────┴───�
    - Postamble (0x55): 帧结束标识
 3. **重组机制**: 按序列号自动重组分片
 4. **错误检测**: 通过校验和验证每个帧的完整性
+
+#### 核心代码实现
+
+**1. 分片器** (data_link_layer.py)
+
+```python
+class PacketSlicer:
+    """消息分片与重组"""
+
+    def __init__(self, max_payload_size: int = 64):
+        self.max_payload_size = max_payload_size
+
+    def slice(self, data: bytes) -> List[bytes]:
+        """将大数据切分成多个小分片"""
+        slices = []
+        for i in range(0, len(data), self.max_payload_size):
+            slice_data = data[i:i + self.max_payload_size]
+            slices.append(slice_data)
+        return slices
+
+    def reassemble(self, slices: List[bytes]) -> bytes:
+        """重组分片为完整数据"""
+        return b''.join(slices)
+```
+
+**功能**: 将大于64字节的消息自动分片，确保每个帧不超过最大传输单元(MTU)。
+
+**2. 数据链路层帧** (data_link_layer.py)
+
+```python
+class DataLinkFrame:
+    """数据链路层帧格式"""
+    PREAMBLE = 0xAA    # 帧开始
+    POSTAMBLE = 0x55   # 帧结束
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.length = len(payload)
+        self.checksum = self._calculate_checksum()
+
+    def _calculate_checksum(self) -> int:
+        """计算简单校验和"""
+        return sum(self.payload) & 0xFF
+
+    def to_bits(self) -> List[int]:
+        """转换为比特流用于物理层传输"""
+        # Preamble (8 bits)
+        bits = int_to_bits(self.PREAMBLE, 8)
+        # Length (16 bits)
+        bits += int_to_bits(self.length, 16)
+        # Payload
+        bits += bytes_to_bits(self.payload)
+        # Checksum (8 bits)
+        bits += int_to_bits(self.checksum, 8)
+        # Postamble (8 bits)
+        bits += int_to_bits(self.POSTAMBLE, 8)
+        return bits
+
+    @classmethod
+    def from_bits(cls, bits: List[int]) -> 'DataLinkFrame':
+        """从比特流解析帧"""
+        # 提取各字段
+        preamble = bits_to_int(bits[0:8])
+        length = bits_to_int(bits[8:24])
+        payload = bits_to_bytes(bits[24:24+length*8])
+        checksum = bits_to_int(bits[24+length*8:32+length*8])
+        postamble = bits_to_int(bits[32+length*8:40+length*8])
+
+        # 验证帧格式
+        if preamble != cls.PREAMBLE or postamble != cls.POSTAMBLE:
+            raise ValueError("Invalid frame format")
+
+        frame = cls(payload)
+        if frame.checksum != checksum:
+            raise ValueError("Checksum mismatch")
+
+        return frame
+```
+
+**功能**: 定义数据链路层帧格式，包含前导码、长度、载荷、校验和、后缀码。提供帧的封装和解析功能。
 
 ---
 
@@ -517,6 +707,154 @@ Switch MAC Table:
 3. **端口映射**: 每个主机连接到交换机的特定端口
 4. **MAC学习**: 交换机通过源MAC地址自动学习主机位置
 5. **帧过滤**: 主机只接收目标MAC与自己匹配的帧
+
+#### 核心代码实现
+
+**1. MAC地址类** (network_layer.py)
+
+```python
+class MACAddress:
+    """48位MAC地址"""
+
+    def __init__(self, address: str):
+        """格式: XX:XX:XX:XX:XX:XX"""
+        self.address = address
+        self.validate()
+
+    def validate(self):
+        """验证MAC地址格式"""
+        parts = self.address.split(':')
+        if len(parts) != 6:
+            raise ValueError("MAC address must have 6 parts")
+        for part in parts:
+            if len(part) != 2 or not all(c in '0123456789ABCDEFabcdef' for c in part):
+                raise ValueError(f"Invalid MAC part: {part}")
+
+    def to_bits(self) -> List[int]:
+        """转换为48位比特流"""
+        bits = []
+        for part in self.address.split(':'):
+            byte_val = int(part, 16)
+            bits += int_to_bits(byte_val, 8)
+        return bits
+
+    @classmethod
+    def from_bits(cls, bits: List[int]) -> 'MACAddress':
+        """从48位比特流创建MAC地址"""
+        if len(bits) != 48:
+            raise ValueError("MAC address must be 48 bits")
+
+        parts = []
+        for i in range(0, 48, 8):
+            byte_val = bits_to_int(bits[i:i+8])
+            parts.append(f'{byte_val:02X}')
+        return cls(':'.join(parts))
+
+    def __str__(self):
+        return self.address
+
+    def __eq__(self, other):
+        return self.address.upper() == str(other).upper()
+```
+
+**功能**: 实现48位MAC地址的表示、验证、比特转换。支持标准XX:XX:XX:XX:XX:XX格式。
+
+**2. 网络帧** (network_layer.py)
+
+```python
+class NetworkFrame:
+    """网络层帧，包含MAC寻址"""
+    BROADCAST_MAC = 'FF:FF:FF:FF:FF:FF'
+
+    def __init__(self, src_mac: str, dst_mac: str, payload: bytes):
+        self.src_mac = MACAddress(src_mac)
+        self.dst_mac = MACAddress(dst_mac)
+        self.payload = payload
+        self.checksum = self._calculate_checksum()
+
+    def _calculate_checksum(self) -> int:
+        """计算帧校验和"""
+        return sum(self.payload) & 0xFF
+
+    def to_bits(self) -> List[int]:
+        """转换为比特流"""
+        bits = []
+        # Preamble
+        bits += int_to_bits(0xAA, 8)
+        # 目标MAC (48 bits)
+        bits += self.dst_mac.to_bits()
+        # 源MAC (48 bits)
+        bits += self.src_mac.to_bits()
+        # Length (16 bits)
+        bits += int_to_bits(len(self.payload), 16)
+        # Payload
+        bits += bytes_to_bits(self.payload)
+        # Checksum (8 bits)
+        bits += int_to_bits(self.checksum, 8)
+        # Postamble
+        bits += int_to_bits(0x55, 8)
+        return bits
+
+    def is_broadcast(self) -> bool:
+        """判断是否为广播帧"""
+        return str(self.dst_mac) == self.BROADCAST_MAC
+```
+
+**功能**: 网络层帧格式，包含源/目标MAC地址、载荷、校验和。支持广播地址判断。
+
+**3. 交换机MAC学习** (network_layer.py)
+
+```python
+class Switch:
+    """以太网交换机，实现MAC学习和转发"""
+
+    def __init__(self, num_ports: int):
+        self.num_ports = num_ports
+        self.mac_table = {}  # MAC -> Port映射
+        self.ports = [[] for _ in range(num_ports)]  # 每个端口的接收队列
+
+    def forward(self, frame: NetworkFrame, incoming_port: int):
+        """
+        转发帧：
+        1. 学习源MAC地址
+        2. 查表转发到目标端口
+        """
+        # MAC学习：记录源MAC来自哪个端口
+        self.mac_table[str(frame.src_mac)] = incoming_port
+
+        # 转发决策
+        if frame.is_broadcast():
+            # 广播：发送到除源端口外的所有端口
+            self._broadcast(frame, incoming_port)
+        elif str(frame.dst_mac) in self.mac_table:
+            # 单播：已知目标，直接转发
+            target_port = self.mac_table[str(frame.dst_mac)]
+            if target_port != incoming_port:  # 避免回传
+                self._send_to_port(target_port, frame)
+        else:
+            # 未知单播：洪泛
+            self._broadcast(frame, incoming_port)
+
+    def _broadcast(self, frame: NetworkFrame, except_port: int):
+        """广播到所有端口（除了源端口）"""
+        for port in range(self.num_ports):
+            if port != except_port:
+                self._send_to_port(port, frame)
+
+    def _send_to_port(self, port: int, frame: NetworkFrame):
+        """发送帧到指定端口"""
+        self.ports[port].append(frame)
+
+    def print_mac_table(self):
+        """打印MAC学习表"""
+        print(f"\n{self.name} MAC Table:")
+        print('-' * 40)
+        for mac, port in self.mac_table.items():
+            print(f'  {mac} -> Port {port}')
+        print('-' * 40)
+```
+
+**功能**: 实现以太网交换机的核心功能——MAC学习和智能转发。自动构建MAC→端口映射表，支持单播/广播/洪泛。
 
 ![星型网络拓扑](demo_level2_topology.png)
 *图2.1: 星型拓扑网络架构示意图*
@@ -846,6 +1184,77 @@ Stop-and-Wait ARQ 协议:
    - ACK响应率100%
    - 无需重传
 
+#### 关键代码实现
+
+```python
+@dataclass
+class TransportSegment:
+    """传输层段结构，包含序列号和确认机制"""
+    seq_num: int      # 序列号（16位）
+    ack_num: int      # 确认号（16位）
+    flags: int        # 控制标志（ACK/NACK/SYN/FIN/DATA）
+    payload: bytes    # 载荷数据
+
+    HEADER_SIZE = 7   # 头部总大小：2+2+1+2=7字节
+
+    def to_bytes(self) -> bytes:
+        """序列化段为字节流"""
+        header = struct.pack('>HHBH',
+                            self.seq_num,
+                            self.ack_num,
+                            self.flags,
+                            len(self.payload))
+        return header + self.payload
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'TransportSegment':
+        """从字节流反序列化段"""
+        seq_num, ack_num, flags, length = struct.unpack('>HHBH', data[:cls.HEADER_SIZE])
+        payload = data[cls.HEADER_SIZE:cls.HEADER_SIZE + length]
+        return cls(seq_num=seq_num, ack_num=ack_num, flags=flags, payload=payload)
+
+class ReliableTransport:
+    """Stop-and-Wait ARQ协议实现"""
+
+    def __init__(self, host: Host, timeout: float = 1.0, max_retries: int = 3):
+        self.host = host
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.send_seq = 0  # 发送序列号
+        self.recv_seq = 0  # 接收序列号
+
+    def send(self, dst_mac: str, data: bytes) -> bool:
+        """可靠发送数据，等待ACK确认"""
+        # 创建数据段
+        segment = TransportSegment(
+            seq_num=self.send_seq,
+            ack_num=0,
+            flags=FLAG_DATA,
+            payload=data
+        )
+
+        # 重传机制
+        for attempt in range(self.max_retries):
+            # 发送段
+            frame = NetworkFrame(self.host.mac.address, dst_mac, segment.to_bytes())
+            self.host.send_frame(frame)
+
+            # 等待ACK（带超时）
+            start_time = time.time()
+            while time.time() - start_time < self.timeout:
+                if self._check_ack_received(self.send_seq):
+                    self.send_seq = (self.send_seq + 1) % 65536
+                    return True  # 成功
+                time.sleep(0.01)
+
+            # 超时，继续重传
+            self.stats['timeouts'] += 1
+
+        return False  # 失败
+```
+
+**功能**: 实现可靠传输协议，使用序列号、ACK确认和超时重传机制保证数据可靠送达。
+
 ---
 
 ### 任务 3.2: 信道编码演示
@@ -973,6 +1382,84 @@ for noise in [0.1, 0.15, 0.2]:
    - 高噪声环境：编码能显著提高可靠性
    - 代价：冗余开销、计算复杂度
 
+#### 关键代码实现
+
+```python
+class HammingCode:
+    """Hamming(7,4)纠错码实现"""
+
+    # 生成矩阵 G (4x7): data * G = codeword
+    G = np.array([
+        [1, 1, 1, 0, 0, 0, 0],  # d1
+        [1, 0, 0, 1, 1, 0, 0],  # d2
+        [0, 1, 0, 1, 0, 1, 0],  # d3
+        [1, 1, 0, 1, 0, 0, 1],  # d4
+    ], dtype=np.int8)
+
+    # 校验矩阵 H (3x7): H * codeword^T = syndrome
+    H = np.array([
+        [1, 0, 1, 0, 1, 0, 1],  # Check p1
+        [0, 1, 1, 0, 0, 1, 1],  # Check p2
+        [0, 0, 0, 1, 1, 1, 1],  # Check p4
+    ], dtype=np.int8)
+
+    def encode(self, data_bits: List[int]) -> List[int]:
+        """将4位数据编码为7位码字"""
+        encoded = []
+        for i in range(0, len(data_bits), 4):
+            block = np.array(data_bits[i:i+4], dtype=np.int8)
+            codeword = np.dot(block, self.G) % 2  # 矩阵乘法，模2运算
+            encoded.extend(codeword.tolist())
+        return encoded
+
+    def decode(self, received_bits: List[int]) -> List[int]:
+        """解码并纠正单比特错误"""
+        decoded = []
+        for i in range(0, len(received_bits), 7):
+            block = np.array(received_bits[i:i+7], dtype=np.int8)
+
+            # 计算校验子（syndrome）
+            syndrome = np.dot(self.H, block) % 2
+            syndrome_value = syndrome[0] + 2*syndrome[1] + 4*syndrome[2]
+
+            if syndrome_value != 0:
+                # 检测到错误，定位并纠正
+                error_pos = syndrome_value - 1
+                if 0 <= error_pos < 7:
+                    block[error_pos] ^= 1  # 翻转错误位
+                    self.stats['errors_corrected'] += 1
+
+            # 提取数据位（位置2,4,5,6）
+            data = [block[2], block[4], block[5], block[6]]
+            decoded.extend(data)
+
+        return decoded
+
+class CRC:
+    """CRC-8循环冗余校验"""
+
+    POLYNOMIAL = 0x07  # x^8 + x^2 + x + 1
+
+    def compute(self, data: bytes) -> int:
+        """计算CRC-8校验和"""
+        crc = 0
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = (crc << 1) ^ self.POLYNOMIAL
+                else:
+                    crc = crc << 1
+                crc &= 0xFF
+        return crc
+
+    def verify(self, data: bytes, checksum: int) -> bool:
+        """验证CRC校验和"""
+        return self.compute(data) == checksum
+```
+
+**功能**: Hamming码通过校验子定位并纠正单比特错误；CRC通过多项式除法检测突发错误。
+
 ---
 
 ### 任务 3.3: 应用层协议演示
@@ -1084,6 +1571,85 @@ Hello, World!
    - 200 OK: 成功
    - 404 Not Found: 路径不存在
    - 其他: 400, 500等
+
+#### 关键代码实现
+
+```python
+@dataclass
+class HTTPRequest:
+    """HTTP请求类"""
+    method: str                                # GET/POST/PUT/DELETE
+    path: str                                  # 请求路径
+    version: str = "HTTP/1.0"
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: str = ""
+
+    def to_bytes(self) -> bytes:
+        """序列化为HTTP格式"""
+        lines = [f"{self.method} {self.path} {self.version}"]
+        for key, value in self.headers.items():
+            lines.append(f"{key}: {value}")
+        lines.append("")  # 空行
+        lines.append(self.body)
+        return "\r\n".join(lines).encode('utf-8')
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'HTTPRequest':
+        """从字节流解析请求"""
+        text = data.decode('utf-8')
+        lines = text.split('\r\n')
+        # 解析请求行
+        method, path, version = lines[0].split(' ', 2)
+        # 解析头部和体
+        headers = {}
+        for line in lines[1:]:
+            if line == "": break
+            key, value = line.split(':', 1)
+            headers[key.strip()] = value.strip()
+        return cls(method=method, path=path, version=version, headers=headers)
+
+@dataclass
+class HTTPResponse:
+    """HTTP响应类"""
+    status_code: int
+    status_message: str
+    version: str = "HTTP/1.0"
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: str = ""
+
+    @classmethod
+    def ok(cls, body: str = "") -> 'HTTPResponse':
+        """创建200 OK响应"""
+        return cls(200, "OK", headers={"Content-Type": "text/plain"}, body=body)
+
+    @classmethod
+    def not_found(cls) -> 'HTTPResponse':
+        """创建404 Not Found响应"""
+        return cls(404, "Not Found")
+
+class HTTPServer:
+    """HTTP服务器，支持路由"""
+
+    def __init__(self, host: Host):
+        self.host = host
+        self.routes = {}  # path -> handler
+
+    def route(self, path: str):
+        """路由装饰器"""
+        def decorator(handler):
+            self.routes[path] = handler
+            return handler
+        return decorator
+
+    def _process_request(self, req: HTTPRequest) -> HTTPResponse:
+        """处理请求并返回响应"""
+        if req.path in self.routes:
+            return self.routes[req.path](req)
+        else:
+            return HTTPResponse.not_found()
+```
+
+**功能**: 实现HTTP/1.0协议的请求/响应解析、路由匹配和状态码处理。
 
 ---
 
@@ -1211,6 +1777,103 @@ print('结论: BPSK > FSK > OOK > ASK (抗噪声性能)')
    - σ=2.5时BER仅0.5%
 5. **性能排名**: BPSK > FSK > OOK > ASK
 6. **噪声说明**: 使用高噪声(0.5-2.5)是因为100采样点平均效应
+
+#### 关键代码实现
+
+```python
+class OOK(ModulationScheme):
+    """On-Off Keying - 开关键控"""
+
+    def modulate(self, bits: List[int]) -> np.ndarray:
+        """1→高电平，0→零电平"""
+        signal = np.zeros(len(bits) * self.samples_per_bit)
+        for i, bit in enumerate(bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            if bit == 1:
+                signal[start:end] = self.amplitude
+        return signal
+
+    def demodulate(self, signal: np.ndarray) -> List[int]:
+        """阈值判决"""
+        num_bits = len(signal) // self.samples_per_bit
+        threshold = np.mean(np.abs(signal)) * 0.5
+        bits = []
+        for i in range(num_bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            avg = np.mean(signal[start:end])
+            bits.append(1 if avg > threshold else 0)
+        return bits
+
+class FSK(ModulationScheme):
+    """Frequency Shift Keying - 频移键控"""
+
+    def __init__(self, freq_1=15.0, freq_0=5.0, **kwargs):
+        super().__init__(**kwargs)
+        self.freq_1 = freq_1  # 比特1的频率
+        self.freq_0 = freq_0  # 比特0的频率
+
+    def modulate(self, bits: List[int]) -> np.ndarray:
+        """不同比特使用不同频率"""
+        signal = np.zeros(len(bits) * self.samples_per_bit)
+        t = np.arange(self.samples_per_bit) / self.samples_per_bit
+        for i, bit in enumerate(bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            freq = self.freq_1 if bit == 1 else self.freq_0
+            signal[start:end] = np.sin(2 * np.pi * freq * t)
+        return signal
+
+    def demodulate(self, signal: np.ndarray) -> List[int]:
+        """相关性检测"""
+        num_bits = len(signal) // self.samples_per_bit
+        t = np.arange(self.samples_per_bit) / self.samples_per_bit
+        ref_1 = np.sin(2 * np.pi * self.freq_1 * t)
+        ref_0 = np.sin(2 * np.pi * self.freq_0 * t)
+        bits = []
+        for i in range(num_bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            segment = signal[start:end]
+            # 与参考信号做相关
+            corr_1 = np.abs(np.sum(segment * ref_1))
+            corr_0 = np.abs(np.sum(segment * ref_0))
+            bits.append(1 if corr_1 > corr_0 else 0)
+        return bits
+
+class BPSK(ModulationScheme):
+    """Binary Phase Shift Keying - 二进制相移键控"""
+
+    def modulate(self, bits: List[int]) -> np.ndarray:
+        """1→0°相位，0→180°相位"""
+        signal = np.zeros(len(bits) * self.samples_per_bit)
+        t = np.arange(self.samples_per_bit) / self.samples_per_bit
+        for i, bit in enumerate(bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            phase = 0 if bit == 1 else np.pi  # 相位差180度
+            signal[start:end] = np.sin(2 * np.pi * self.carrier_freq * t + phase)
+        return signal
+
+    def demodulate(self, signal: np.ndarray) -> List[int]:
+        """相位相关性检测，抗噪性最强"""
+        num_bits = len(signal) // self.samples_per_bit
+        t = np.arange(self.samples_per_bit) / self.samples_per_bit
+        ref_1 = np.sin(2 * np.pi * self.carrier_freq * t)
+        ref_0 = np.sin(2 * np.pi * self.carrier_freq * t + np.pi)
+        bits = []
+        for i in range(num_bits):
+            start = i * self.samples_per_bit
+            end = (i + 1) * self.samples_per_bit
+            segment = signal[start:end]
+            corr_1 = np.sum(segment * ref_1)
+            corr_0 = np.sum(segment * ref_0)
+            bits.append(1 if corr_1 > corr_0 else 0)
+        return bits
+```
+
+**功能**: 实现四种调制方式，BPSK通过相位相关性检测达到最优抗噪性能。
 
 ![调制方式对比](modulation_comparison.png)
 *图3.4: 四种调制方式的误码率对比曲线*
@@ -1341,6 +2004,99 @@ print('   - 消息队列实现非阻塞通信')
    - 并发处理提高吞吐量
    - 非阻塞I/O
    - 模拟真实网络环境
+
+#### 关键代码实现
+
+```python
+class ThreadedHost:
+    """支持并发的网络主机"""
+
+    def __init__(self, mac: str, name: str = None):
+        self.mac = MACAddress(mac)
+        self.name = name or f"THost-{mac[-5:]}"
+
+        # 线程安全队列
+        self.send_queue = SafeQueue(maxsize=100)
+        self.receive_queue = SafeQueue(maxsize=100)
+
+        # 工作线程
+        self.send_thread = None
+        self.receive_thread = None
+        self._running = False
+
+    def start(self):
+        """启动发送和接收线程"""
+        self._running = True
+        self.send_thread = threading.Thread(target=self._send_loop, daemon=True)
+        self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+        self.send_thread.start()
+        self.receive_thread.start()
+
+    def _send_loop(self):
+        """发送线程循环"""
+        while self._running:
+            frame = self.send_queue.get(timeout=0.1)
+            if frame:
+                # 调制、传输
+                bits = frame.to_bits()
+                signal = modulate_ook(bits)
+                self.cable.transmit(signal)
+                self.stats['frames_sent'] += 1
+
+    def _receive_loop(self):
+        """接收线程循环"""
+        while self._running:
+            # 从物理层接收信号
+            signal = self.cable.receive(timeout=0.1)
+            if signal is not None:
+                try:
+                    # 解调、解帧
+                    bits = demodulate_ook(signal)
+                    frame = NetworkFrame.from_bits(bits)
+                    # 放入接收队列
+                    self.receive_queue.put(frame)
+                    self.stats['frames_received'] += 1
+                except Exception as e:
+                    self.stats['receive_errors'] += 1
+
+    def send_string(self, dst_mac: str, message: str) -> bool:
+        """非阻塞发送消息"""
+        frame = NetworkFrame(self.mac.address, dst_mac, message.encode())
+        return self.send_queue.put(frame, timeout=0.1)
+
+    def receive_nowait(self) -> Optional[NetworkFrame]:
+        """非阻塞接收消息"""
+        return self.receive_queue.get_nowait()
+
+class ConcurrentNetwork:
+    """多线程并发网络"""
+
+    def __init__(self, num_hosts: int, num_workers: int = 4):
+        self.num_hosts = num_hosts
+        self.switch = ThreadedSwitch(num_workers=num_workers)  # 线程池交换机
+        self.hosts = []
+
+        # 创建主机并连接到交换机
+        for i in range(num_hosts):
+            mac = f'00:00:00:00:00:0{i+1}'
+            host = ThreadedHost(mac, f"CHost{i+1}")
+            host.connect_to_switch(self.switch, port_id=i)
+            self.hosts.append(host)
+
+    def start(self):
+        """启动所有主机和交换机"""
+        self.switch.start()
+        for host in self.hosts:
+            host.start()
+
+    def stop(self):
+        """停止所有线程"""
+        for host in self.hosts:
+            host.stop()
+        self.switch.stop()
+```
+
+**功能**: 使用线程池和消息队列实现并发网络，所有主机可同时收发消息，无阻塞。
 
 ![Level 3总结](demo_level3_summary.png)
 *图3.6: Level 3扩展功能综合展示*
